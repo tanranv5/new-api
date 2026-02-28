@@ -36,14 +36,17 @@ jobs:
           git checkout main
           git reset --hard origin/main
 
-          if git merge -X ours --no-edit upstream/main; then
-            # 保留当前仓库自己的 workflow，避免因上游 workflow 变更导致推送权限失败
-            git checkout origin/main -- .github/workflows
+          if git merge -X ours --no-commit upstream/main; then
+            # 保留当前仓库自己的 workflows，避免 workflow 权限限制导致 push 被拒
+            git restore --source=origin/main --staged --worktree .github/workflows || true
 
-            if git diff --quiet HEAD origin/main; then
+            if git diff --quiet origin/main; then
+              git merge --abort || true
               echo "No upstream changes to sync"
               exit 0
             fi
+
+            git commit -m "chore: sync upstream main (preserve fork conflict hunks)"
             git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
           else
             echo "Merge failed, aborting"
