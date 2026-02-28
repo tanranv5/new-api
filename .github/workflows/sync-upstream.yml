@@ -1,0 +1,49 @@
+name: Sync Upstream New-API
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+
+          git remote add upstream https://github.com/QuantumNous/new-api.git || git remote set-url upstream https://github.com/QuantumNous/new-api.git
+          git fetch origin main
+          git fetch upstream main
+
+          git checkout main
+          git reset --hard origin/main
+
+          if git merge --no-edit upstream/main; then
+            if git diff --quiet HEAD origin/main; then
+              echo "No upstream changes to sync"
+              exit 0
+            fi
+            git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
+          else
+            echo "Merge conflict detected, aborting"
+            git merge --abort || true
+            exit 1
+          fi
