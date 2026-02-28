@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -91,13 +92,19 @@ func processHeaderOverride(c *gin.Context, info *common.RelayInfo) (map[string]s
 		if !ok {
 			return nil, types.NewError(nil, types.ErrorCodeChannelHeaderOverrideInvalid)
 		}
-
-		// 替换支持的变量
-		if strings.Contains(str, "{api_key}") {
-			str = strings.ReplaceAll(str, "{api_key}", info.ApiKey)
+		if info.IsChannelTest && strings.HasPrefix(strings.TrimSpace(str), clientHeaderPlaceholderPrefix) {
+			continue
 		}
 
-		headerOverride[k] = str
+		value, include, err := applyHeaderOverridePlaceholders(str, c, info.ApiKey)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeChannelHeaderOverrideInvalid)
+		}
+		if !include {
+			continue
+		}
+
+		headerOverride[key] = value
 	}
 	if len(headerOverride) == 0 {
 		logger.LogDebug(c, "请求头覆盖结果: channel_id=%d, channel_type=%d, headers=空", channelId, channelType)
@@ -105,6 +112,19 @@ func processHeaderOverride(c *gin.Context, info *common.RelayInfo) (map[string]s
 		logger.LogDebug(c, "请求头覆盖结果: channel_id=%d, channel_type=%d, headers=%s", channelId, channelType, common2.GetJsonString(maskHeaderOverrideForLogString(headerOverride, info.ApiKey)))
 	}
 	return headerOverride, nil
+}
+
+func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]string) {
+	if req == nil {
+		return
+	}
+	for key, value := range headerOverride {
+		req.Header.Set(key, value)
+		// set Host in req
+		if strings.EqualFold(key, "Host") {
+			req.Host = value
+		}
+	}
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
@@ -131,6 +151,13 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
+	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
+	// 这样可以覆盖默认的 Authorization header 设置
+	headerOverride, err := processHeaderOverride(info, c)
+	if err != nil {
+		return nil, err
+	}
+	applyHeaderOverrideToRequest(req, headerOverride)
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
@@ -164,6 +191,13 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
+	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
+	// 这样可以覆盖默认的 Authorization header 设置
+	headerOverride, err := processHeaderOverride(info, c)
+	if err != nil {
+		return nil, err
+	}
+	applyHeaderOverrideToRequest(req, headerOverride)
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
@@ -183,10 +217,6 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	for key, value := range headerOverride {
 		targetHeader.Set(key, value)
-	}
-	err = a.SetupRequestHeader(c, &targetHeader, info)
-	if err != nil {
-		return nil, fmt.Errorf("setup request header failed: %w", err)
 	}
 	targetHeader.Set("Content-Type", c.Request.Header.Get("Content-Type"))
 	targetConn, _, err := websocket.DefaultDialer.Dial(fullRequestURL, targetHeader)

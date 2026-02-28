@@ -1,13 +1,13 @@
 package controller
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -45,7 +45,7 @@ func relayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIErro
 		err = relay.RerankHelper(c, info)
 	case relayconstant.RelayModeEmbeddings:
 		err = relay.EmbeddingHelper(c, info)
-	case relayconstant.RelayModeResponses:
+	case relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact:
 		err = relay.ResponsesHelper(c, info)
 	default:
 		err = relay.TextHelper(c, info)
@@ -159,7 +159,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if priceData.FreeModel {
 		logger.LogInfo(c, fmt.Sprintf("模型 %s 免费，跳过预扣费", relayInfo.OriginModelName))
 	} else {
-		newAPIError = service.PreConsumeQuota(c, priceData.QuotaToPreConsume, relayInfo)
+		newAPIError = service.PreConsumeBilling(c, priceData.QuotaToPreConsume, relayInfo)
 		if newAPIError != nil {
 			return
 		}
@@ -167,8 +167,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	defer func() {
 		// Only return quota if downstream failed and quota was actually pre-consumed
-		if newAPIError != nil && relayInfo.FinalPreConsumedQuota != 0 {
-			service.ReturnPreConsumedQuota(c, relayInfo)
+		if newAPIError != nil {
+			newAPIError = service.NormalizeViolationFeeError(newAPIError)
+			if relayInfo.Billing != nil {
+				relayInfo.Billing.Refund(c)
+			}
+			service.ChargeViolationFeeIfNeeded(c, relayInfo, newAPIError)
 		}
 	}()
 
@@ -178,6 +182,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ModelName:  relayInfo.OriginModelName,
 		Retry:      common.GetPointer(0),
 	}
+	relayInfo.RetryIndex = 0
+	relayInfo.LastError = nil
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		logger.LogDebug(c, "渠道请求开始: retry=%d/%d, model=%q, relay_mode=%d, token_group=%q, using_group=%q", retryParam.GetRetry(), common.RetryTimes, relayInfo.OriginModelName, relayInfo.RelayMode, relayInfo.TokenGroup, relayInfo.UsingGroup)
@@ -191,7 +197,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		logger.LogDebug(c, "渠道选择成功: retry=%d, channel_id=%d, channel_type=%d, channel_name=%q", retryParam.GetRetry(), channel.Id, channel.Type, channel.Name)
 		addUsedChannel(c, channel.Id)
-		requestBody, bodyErr := common.GetRequestBody(c)
+		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			logger.LogDebug(c, "读取请求体失败: retry=%d, err=%s", retryParam.GetRetry(), bodyErr.Error())
 			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
@@ -202,7 +208,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 			break
 		}
-		c.Request.Body = io.NopCloser(bytes.NewBuffer(requestBody))
+		c.Request.Body = io.NopCloser(bodyStorage)
 
 		switch relayFormat {
 		case types.RelayFormatOpenAIRealtime:
@@ -314,6 +320,9 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if openaiErr == nil {
 		return false
 	}
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
+		return false
+	}
 	if types.IsChannelError(openaiErr) {
 		return true
 	}
@@ -388,8 +397,14 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			adminInfo["is_multi_key"] = true
 			adminInfo["multi_key_index"] = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 		}
+		service.AppendChannelAffinityAdminInfo(c, adminInfo)
 		other["admin_info"] = adminInfo
-		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, 0, false, userGroup, other)
+		startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
+		if startTime.IsZero() {
+			startTime = time.Now()
+		}
+		useTimeSeconds := int(time.Since(startTime).Seconds())
+		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, false, userGroup, other)
 	}
 
 }
@@ -461,18 +476,45 @@ func RelayNotFound(c *gin.Context) {
 	})
 }
 
-func RelayTask(c *gin.Context) {
-	retryTimes := common.RetryTimes
-	channelId := c.GetInt("channel_id")
-	c.Set("use_channel", []string{fmt.Sprintf("%d", channelId)})
+func RelayTaskFetch(c *gin.Context) {
 	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, &dto.TaskError{
+			Code:       "gen_relay_info_failed",
+			Message:    err.Error(),
+			StatusCode: http.StatusInternalServerError,
+		})
 		return
 	}
-	taskErr := taskRelayHandler(c, relayInfo)
-	if taskErr == nil {
-		retryTimes = 0
+	if taskErr := relay.RelayTaskFetch(c, relayInfo.RelayMode); taskErr != nil {
+		respondTaskError(c, taskErr)
 	}
+}
+
+func RelayTask(c *gin.Context) {
+	relayInfo, err := relaycommon.GenRelayInfo(c, types.RelayFormatTask, nil, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, &dto.TaskError{
+			Code:       "gen_relay_info_failed",
+			Message:    err.Error(),
+			StatusCode: http.StatusInternalServerError,
+		})
+		return
+	}
+
+	if taskErr := relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
+		respondTaskError(c, taskErr)
+		return
+	}
+
+	var result *relay.TaskSubmitResult
+	var taskErr *dto.TaskError
+	defer func() {
+		if taskErr != nil && relayInfo.Billing != nil {
+			relayInfo.Billing.Refund(c)
+		}
+	}()
+
 	retryParam := &service.RetryParam{
 		Ctx:        c,
 		TokenGroup: relayInfo.TokenGroup,
@@ -502,7 +544,7 @@ func RelayTask(c *gin.Context) {
 			if common.IsRequestBodyTooLargeError(err) || errors.Is(err, common.ErrRequestBodyTooLarge) {
 				taskErr = service.TaskErrorWrapperLocal(err, "read_request_body_failed", http.StatusRequestEntityTooLarge)
 			} else {
-				taskErr = service.TaskErrorWrapperLocal(err, "read_request_body_failed", http.StatusBadRequest)
+				taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", http.StatusBadRequest)
 			}
 			break
 		}
@@ -514,32 +556,59 @@ func RelayTask(c *gin.Context) {
 			logger.LogDebug(c, "任务渠道请求失败: retry=%d, channel_id=%d, status=%d, code=%s, message=%s", retryParam.GetRetry(), channelId, taskErr.StatusCode, taskErr.Code, taskErr.Message)
 		}
 	}
+
 	useChannel := c.GetStringSlice("use_channel")
 	if len(useChannel) > 1 {
 		retryLogStr := fmt.Sprintf("重试：%s", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(useChannel)), "->"), "[]"))
 		logger.LogInfo(c, retryLogStr)
 	}
-	if taskErr != nil {
-		if taskErr.StatusCode == http.StatusTooManyRequests {
-			taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
+
+	// ── 成功：结算 + 日志 + 插入任务 ──
+	if taskErr == nil {
+		if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
+			common.SysError("settle task billing error: " + settleErr.Error())
 		}
-		c.JSON(taskErr.StatusCode, taskErr)
+		service.LogTaskConsumption(c, relayInfo)
+
+		task := model.InitTask(result.Platform, relayInfo)
+		task.PrivateData.UpstreamTaskID = result.UpstreamTaskID
+		task.PrivateData.BillingSource = relayInfo.BillingSource
+		task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
+		task.PrivateData.TokenId = relayInfo.TokenId
+		task.PrivateData.BillingContext = &model.TaskBillingContext{
+			ModelPrice:      relayInfo.PriceData.ModelPrice,
+			GroupRatio:      relayInfo.PriceData.GroupRatioInfo.GroupRatio,
+			ModelRatio:      relayInfo.PriceData.ModelRatio,
+			OtherRatios:     relayInfo.PriceData.OtherRatios,
+			OriginModelName: relayInfo.OriginModelName,
+			PerCallBilling:  common.StringsContains(constant.TaskPricePatches, relayInfo.OriginModelName),
+		}
+		task.Quota = result.Quota
+		task.Data = result.TaskData
+		task.Action = relayInfo.Action
+		if insertErr := task.Insert(); insertErr != nil {
+			common.SysError("insert task error: " + insertErr.Error())
+		}
+	}
+
+	if taskErr != nil {
+		respondTaskError(c, taskErr)
 	}
 }
 
-func taskRelayHandler(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dto.TaskError {
-	var err *dto.TaskError
-	switch relayInfo.RelayMode {
-	case relayconstant.RelayModeSunoFetch, relayconstant.RelayModeSunoFetchByID, relayconstant.RelayModeVideoFetchByID:
-		err = relay.RelayTaskFetch(c, relayInfo.RelayMode)
-	default:
-		err = relay.RelayTaskSubmit(c, relayInfo)
+// respondTaskError 统一输出 Task 错误响应（含 429 限流提示改写）
+func respondTaskError(c *gin.Context, taskErr *dto.TaskError) {
+	if taskErr.StatusCode == http.StatusTooManyRequests {
+		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
 	}
-	return err
+	c.JSON(taskErr.StatusCode, taskErr)
 }
 
 func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *dto.TaskError, retryTimes int) bool {
 	if taskErr == nil {
+		return false
+	}
+	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
 	}
 	if retryTimes <= 0 {
@@ -556,7 +625,7 @@ func shouldRetryTaskRelay(c *gin.Context, channelId int, taskErr *dto.TaskError,
 	}
 	if taskErr.StatusCode/100 == 5 {
 		// 超时不重试
-		if taskErr.StatusCode == 504 || taskErr.StatusCode == 524 {
+		if operation_setting.IsAlwaysSkipRetryStatusCode(taskErr.StatusCode) {
 			return false
 		}
 		return true
