@@ -6,27 +6,18 @@ import (
 	"fmt"
 	"strings"
 
+	basecommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
-	relayconstant "github.com/QuantumNous/new-api/relay/constant"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 )
 
 func ModelMappedHelper(c *gin.Context, info *common.RelayInfo, request dto.Request) error {
-	if info.ChannelMeta == nil {
-		info.ChannelMeta = &common.ChannelMeta{}
-	}
-
-	isResponsesCompact := info.RelayMode == relayconstant.RelayModeResponsesCompact
-	originModelName := info.OriginModelName
-	mappingModelName := originModelName
-	if isResponsesCompact && strings.HasSuffix(originModelName, ratio_setting.CompactModelSuffix) {
-		mappingModelName = strings.TrimSuffix(originModelName, ratio_setting.CompactModelSuffix)
-	}
-
 	// map model name
 	modelMapping := c.GetString("model_mapping")
+	logger.LogDebug(c, "模型映射检查: 原模型=%q, 映射配置=%s", info.OriginModelName, modelMapping)
+	chain := []string{info.OriginModelName}
 	if modelMapping != "" && modelMapping != "{}" {
 		modelMap := make(map[string]string)
 		err := json.Unmarshal([]byte(modelMapping), &modelMap)
@@ -34,8 +25,10 @@ func ModelMappedHelper(c *gin.Context, info *common.RelayInfo, request dto.Reque
 			return fmt.Errorf("unmarshal_model_mapping_failed")
 		}
 
+		logger.LogDebug(c, "模型映射解析: 原模型=%q, 映射表=%s", info.OriginModelName, basecommon.GetJsonString(modelMap))
+
 		// 支持链式模型重定向，最终使用链尾的模型
-		currentModel := mappingModelName
+		currentModel := info.OriginModelName
 		visitedModels := map[string]bool{
 			currentModel: true,
 		}
@@ -56,6 +49,7 @@ func ModelMappedHelper(c *gin.Context, info *common.RelayInfo, request dto.Reque
 				}
 				visitedModels[mappedModel] = true
 				currentModel = mappedModel
+				chain = append(chain, currentModel)
 				info.IsModelMapped = true
 			} else {
 				break
@@ -64,16 +58,14 @@ func ModelMappedHelper(c *gin.Context, info *common.RelayInfo, request dto.Reque
 		if info.IsModelMapped {
 			info.UpstreamModelName = currentModel
 		}
+	} else {
+		logger.LogDebug(c, "模型映射跳过: 原模型=%q, 未配置映射表", info.OriginModelName)
 	}
-
-	if isResponsesCompact {
-		finalUpstreamModelName := mappingModelName
-		if info.IsModelMapped && info.UpstreamModelName != "" {
-			finalUpstreamModelName = info.UpstreamModelName
-		}
-		info.UpstreamModelName = finalUpstreamModelName
-		info.OriginModelName = ratio_setting.WithCompactModelSuffix(finalUpstreamModelName)
+	upstreamModel := info.UpstreamModelName
+	if upstreamModel == "" {
+		upstreamModel = info.OriginModelName
 	}
+	logger.LogDebug(c, "模型映射结果: 原模型=%q, 映射链路=%s, 上游模型=%q, 已映射=%t", info.OriginModelName, strings.Join(chain, "->"), upstreamModel, info.IsModelMapped)
 	if request != nil {
 		request.SetModelName(info.UpstreamModelName)
 	}
