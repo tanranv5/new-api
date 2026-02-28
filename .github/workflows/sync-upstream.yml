@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   sync-upstream:
@@ -38,6 +37,9 @@ jobs:
           git reset --hard origin/main
 
           if git merge -X ours --no-edit upstream/main; then
+            # 保留当前仓库自己的 workflow，避免因上游 workflow 变更导致推送权限失败
+            git checkout origin/main -- .github/workflows
+
             if git diff --quiet HEAD origin/main; then
               echo "No upstream changes to sync"
               exit 0
