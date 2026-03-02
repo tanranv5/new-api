@@ -11,6 +11,9 @@ permissions:
 jobs:
   sync-upstream:
     runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.sync.outputs.has_changes }}
+      synced_sha: ${{ steps.sync.outputs.synced_sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,6 +27,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Sync from upstream
+        id: sync
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -35,6 +39,7 @@ jobs:
 
           git checkout main
           git reset --hard origin/main
+          base_sha=$(git rev-parse origin/main)
 
           if git merge -X ours --no-commit upstream/main; then
             # 保留当前仓库自己的 workflows，避免 workflow 权限限制导致 push 被拒
@@ -43,13 +48,63 @@ jobs:
             if git diff --quiet origin/main; then
               git merge --abort || true
               echo "No upstream changes to sync"
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "synced_sha=$base_sha" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
             git commit -m "chore: sync upstream main (preserve fork conflict hunks)"
+            synced_sha=$(git rev-parse HEAD)
             git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "synced_sha=$synced_sha" >> "$GITHUB_OUTPUT"
           else
             echo "Merge failed, aborting"
             git merge --abort || true
             exit 1
           fi
+
+  build-ghcr:
+    needs: sync-upstream
+    if: needs.sync-upstream.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out synced commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync-upstream.outputs.synced_sha }}
+          fetch-depth: 1
+
+      - name: Normalize GHCR repository
+        run: echo "GHCR_REPOSITORY=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      - name: Set image tags
+        run: |
+          echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          echo "SYNCED_SHA=${{ needs.sync-upstream.outputs.synced_sha }}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ env.GHCR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+            ghcr.io/${{ env.GHCR_REPOSITORY }}:${{ env.SYNCED_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
