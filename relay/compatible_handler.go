@@ -105,11 +105,13 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
+		body, err := storage.Bytes()
+		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
 		common.SetContextKey(c, constant.ContextKeyProcessedRequestBody, string(body))
 		if common.DebugEnabled {
-			if debugBytes, bErr := storage.Bytes(); bErr == nil {
-				println("requestBody: ", string(debugBytes))
-			}
+			println("requestBody: ", string(body))
 		}
 		requestBody = common.ReaderOnly(storage)
 	} else {

@@ -24,7 +24,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	info.InitChannelMeta(c)
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		switch info.ApiType {
-		case appconstant.APITypeOpenAI, appconstant.APITypeCodex:
+		case constant.APITypeOpenAI, constant.APITypeCodex:
 		default:
 			return types.NewErrorWithStatusCode(
 				fmt.Errorf("unsupported endpoint %q for api type %d", "/v1/responses/compact", info.ApiType),
@@ -76,8 +76,12 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
+		body, err := storage.Bytes()
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
 		common.SetContextKey(c, constant.ContextKeyProcessedRequestBody, string(body))
-		requestBody = bytes.NewBuffer(body)
+		requestBody = common.ReaderOnly(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
