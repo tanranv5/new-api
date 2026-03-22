@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
@@ -76,9 +77,12 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var responseId = common.GetUUID()
 	var created = time.Now().Unix()
 	var toolCallIndex int
+	var lastStreamData string
 	start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
 	if data, err := common.Marshal(start); err == nil {
-		_ = helper.StringData(c, string(data))
+		lastStreamData = string(data)
+	} else {
+		return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
 
 	for scanner.Scan() {
@@ -96,9 +100,13 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			model = chunk.Model
 		}
 		created = toUnix(chunk.CreatedAt)
+		if lastStreamData != "" {
+			if err := openai.HandleStreamFormat(c, info, lastStreamData, false, false); err != nil {
+				return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+			}
+		}
 
 		if !chunk.Done {
-			// delta content
 			var content string
 			if chunk.Message != nil {
 				content = chunk.Message.Content
@@ -135,8 +143,10 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			if chunk.Message != nil && len(chunk.Message.ToolCalls) > 0 {
 				delta.Choices[0].Delta.ToolCalls = make([]dto.ToolCallResponse, 0, len(chunk.Message.ToolCalls))
 				for _, tc := range chunk.Message.ToolCalls {
-					// arguments -> string
-					argBytes, _ := json.Marshal(tc.Function.Arguments)
+					argBytes, err := common.Marshal(tc.Function.Arguments)
+					if err != nil {
+						return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+					}
 					toolId := fmt.Sprintf("call_%d", toolCallIndex)
 					tr := dto.ToolCallResponse{ID: toolId, Type: "function", Function: dto.FunctionResponse{Name: tc.Function.Name, Arguments: string(argBytes)}}
 					tr.SetIndex(toolCallIndex)
@@ -145,12 +155,12 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 				}
 			}
 			if data, err := common.Marshal(delta); err == nil {
-				_ = helper.StringData(c, string(data))
+				lastStreamData = string(data)
+			} else {
+				return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 			}
 			continue
 		}
-		// done frame
-		// finalize once and break loop
 		usage.PromptTokens = chunk.PromptEvalCount
 		usage.CompletionTokens = chunk.EvalCount
 		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
@@ -158,25 +168,24 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		if finishReason == "" {
 			finishReason = "stop"
 		}
-		// emit stop delta
 		if stop := helper.GenerateStopResponse(responseId, created, model, finishReason); stop != nil {
 			if data, err := common.Marshal(stop); err == nil {
-				_ = helper.StringData(c, string(data))
+				lastStreamData = string(data)
+			} else {
+				return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 			}
 		}
-		// emit usage frame
-		if final := helper.GenerateFinalUsageResponse(responseId, created, model, *usage); final != nil {
-			if data, err := common.Marshal(final); err == nil {
-				_ = helper.StringData(c, string(data))
-			}
-		}
-		// send [DONE]
-		helper.Done(c)
 		break
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		logger.LogError(c, "ollama stream scan error: "+err.Error())
 	}
+	if lastStreamData != "" && info.RelayFormat == types.RelayFormatOpenAI {
+		if err := openai.HandleStreamFormat(c, info, lastStreamData, false, false); err != nil {
+			return usage, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+		}
+	}
+	openai.HandleFinalResponse(c, info, lastStreamData, responseId, created, model, "", usage, false)
 	return usage, nil
 }
 
