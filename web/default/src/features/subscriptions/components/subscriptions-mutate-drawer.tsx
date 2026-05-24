@@ -328,7 +328,7 @@ export function SubscriptionsMutateDrawer({
                   name='total_amount'
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t('Total Quota')}</FormLabel>
+                      <FormLabel>{t('Received amount')}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
@@ -340,7 +340,9 @@ export function SubscriptionsMutateDrawer({
                         />
                       </FormControl>
                       <FormDescription>
-                        {t('0 means unlimited')}
+                        {t(
+                          '0 means unlimited. The value is converted to quota units when saved.'
+                        )}
                       </FormDescription>
                       <FormMessage />
                     </FormItem>
@@ -673,9 +675,7 @@ export function SubscriptionsMutateDrawer({
                           disabled={items.length === 0}
                         >
                           <SelectTrigger className='w-full flex-1'>
-                            <SelectValue
-                              placeholder={t('Select a product')}
-                            />
+                            <SelectValue placeholder={t('Select a product')} />
                           </SelectTrigger>
                           <SelectContent>
                             {items.map((item) => (
@@ -689,7 +689,9 @@ export function SubscriptionsMutateDrawer({
                           type='button'
                           variant='outline'
                           onClick={handleCreatePancakeProduct}
-                          disabled={creatingPancakeProduct || !pancakeCreateReady}
+                          disabled={
+                            creatingPancakeProduct || !pancakeCreateReady
+                          }
                           className='shrink-0'
                         >
                           {creatingPancakeProduct
