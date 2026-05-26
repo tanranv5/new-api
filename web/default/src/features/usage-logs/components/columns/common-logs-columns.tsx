@@ -357,7 +357,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
                     )}
                   </div>
                   {log.channel_name && (
-                    <span className='text-muted-foreground/70 truncate text-[11px]'>
+                    <span className='text-muted-foreground/70 truncate [font-family:var(--font-body)] !text-xs'>
                       {channelName}
                     </span>
                   )}
@@ -491,7 +491,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
                   copyText={sensitiveVisible ? tokenName : undefined}
                   size='sm'
                   showDot={false}
-                  className='border-border/60 bg-muted/30 text-foreground max-w-full overflow-hidden rounded-md border h-6 px-2 py-0.5 gap-1.5 font-mono'
+                  className='border-border/60 bg-muted/30 text-foreground h-6 max-w-full gap-1.5 overflow-hidden rounded-md border px-2 py-0.5 [font-family:var(--font-body)]'
                 />
               </TooltipTrigger>
               {sensitiveVisible && tokenName.length > 16 && (
@@ -502,7 +502,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
             </Tooltip>
           </TooltipProvider>
           {metaParts.length > 0 && (
-            <span className='text-muted-foreground/60 truncate text-[11px]'>
+            <span className='text-muted-foreground/60 truncate [font-family:var(--font-body)] !text-xs'>
               {metaParts.join(' · ')}
             </span>
           )}
@@ -598,13 +598,13 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
                   />
                 ))}
             </div>
-            <div className='flex items-center gap-1 text-[11px]'>
-              <span className='text-muted-foreground/60'>
+            <div className='flex items-center gap-1 [font-family:var(--font-body)] !text-xs leading-none'>
+              <span className='text-muted-foreground/60 [font-family:var(--font-body)] !text-xs leading-none'>
                 {log.is_stream ? t('Stream') : t('Non-stream')}
                 {tokensPerSecond != null && (
                   <>
                     {' · '}
-                    <span className='font-mono tabular-nums'>
+                    <span className='tabular-nums'>
                       {Math.round(tokensPerSecond)}
                     </span>
                     {' t/s'}
@@ -736,7 +736,7 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
 
         return (
           <div className='flex flex-col gap-0.5'>
-            <span className='border-border/80 bg-muted/60 inline-flex w-fit items-center rounded-md border px-1.5 py-0.5 font-mono text-xs font-semibold tabular-nums'>
+            <span className='border-border/80 bg-muted/60 inline-flex w-fit items-center rounded-md border px-1.5 py-0.5 [font-family:var(--font-body)] font-semibold tabular-nums'>
               {quotaStr}
             </span>
           </div>
